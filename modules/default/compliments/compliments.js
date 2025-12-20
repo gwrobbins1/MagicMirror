@@ -10,10 +10,10 @@ Module.register("compliments", {
 			evening: ["Wow, you look hot!", "You look nice!", "Hi, sexy!"],
 			"....-01-01": ["Happy new year!"]
 		},
-		updateInterval: 30000,
+		updateInterval: 60 * 1000, // 1 minute
 		remoteFile: null,
 		remoteFileRefreshInterval: 0,
-		fadeSpeed: 4000,
+		fadeSpeed: 2000, // 2 second fade animation
 		morningStartTime: 3,
 		morningEndTime: 12,
 		afternoonStartTime: 12,
@@ -43,8 +43,19 @@ Module.register("compliments", {
 
 		if (this.config.remoteFile !== null) {
 			const response = await this.loadComplimentFile();
-			this.config.compliments = JSON.parse(response);
-			this.updateDom();
+			if (!response) {
+				Log.error(`${this.name} failed to load remote file, using defaults`);
+				// Keep using default compliments
+			} else {
+				try {
+					this.config.compliments = JSON.parse(response);
+					Log.info(`${this.name} loaded ${Object.keys(this.config.compliments).length} compliment categories`);
+					this.updateDom(0);
+				} catch (error) {
+					Log.error(`${this.name} failed to parse JSON from remote file:`, error);
+					// Keep using default compliments
+				}
+			}
 			if (this.config.remoteFileRefreshInterval !== 0) {
 				if ((this.config.remoteFileRefreshInterval >= this.refreshMinimumDelay) || window.mmTestMode === "true") {
 					setInterval(async () => {
@@ -63,22 +74,62 @@ Module.register("compliments", {
 			}
 		}
 		let minute_sync_delay = 1;
+		let hasCronEntries = false;
 		// loop thru all the configured when events
 		for (let m of Object.keys(this.config.compliments)) {
 			// if it is a cron entry
 			if (this.isCronEntry(m)) {
 				// we need to synch our interval cycle to the minute
 				minute_sync_delay = (60 - (moment().second())) * 1000;
+				hasCronEntries = true;
 				break;
 			}
 		}
-		// Schedule update timer. sync to the minute start (if needed), so minute based events happen on the minute start
-		setTimeout(() => {
-			setInterval(() => {
+		// Clear any existing interval and timeout before creating new ones
+		if (this.updateInterval) {
+			clearInterval(this.updateInterval);
+			this.updateInterval = null;
+		}
+		if (this.updateTimeout) {
+			clearTimeout(this.updateTimeout);
+			this.updateTimeout = null;
+		}
+		// If no remote file was loaded, ensure initial display
+		if (this.config.remoteFile === null) {
+			this.updateDom(0);
+		}
+
+		// Start the update interval immediately if no cron entries, otherwise sync to minute
+		const startInterval = () => {
+			// Clear any existing interval before creating a new one
+			if (this.updateInterval) {
+				clearInterval(this.updateInterval);
+			}
+			Log.info(`${this.name} starting update interval: ${this.config.updateInterval}ms with fadeSpeed: ${this.config.fadeSpeed}ms`);
+			this.updateInterval = setInterval(() => {
+				// Update with fade animation
+				Log.info(`${this.name} interval triggered at ${new Date().toISOString()}, updating with fade`);
+				// Force a different selection by resetting index if needed
+				const compliments = this.complimentArray();
+				if (compliments.length > 1 && this.config.random && this.lastComplimentIndex >= 0) {
+					// Ensure we don't get stuck on the same index
+					Log.debug(`${this.name} current lastComplimentIndex=${this.lastComplimentIndex}, array length=${compliments.length}`);
+				}
+				// Use fadeSpeed for smooth transitions
 				this.updateDom(this.config.fadeSpeed);
 			}, this.config.updateInterval);
-		},
-		minute_sync_delay);
+		};
+
+		if (hasCronEntries) {
+			// Schedule update timer. sync to the minute start (if needed), so minute based events happen on the minute start
+			this.updateTimeout = setTimeout(() => {
+				startInterval();
+				this.updateTimeout = null;
+			}, minute_sync_delay);
+		} else {
+			// No cron entries, start immediately
+			startInterval();
+		}
 	},
 
 	// check to see if this entry could be a cron entry wich contains spaces
@@ -110,6 +161,8 @@ Module.register("compliments", {
 	 */
 	randomIndex (compliments) {
 		if (compliments.length <= 1) {
+			// If only one compliment, always return 0
+			this.lastComplimentIndex = 0;
 			return 0;
 		}
 
@@ -118,12 +171,37 @@ Module.register("compliments", {
 		};
 
 		let complimentIndex = generate();
+		let attempts = 0;
+		const maxAttempts = 100; // Prevent infinite loop
 
-		while (complimentIndex === this.lastComplimentIndex) {
-			complimentIndex = generate();
+		// Ensure we always get a different index than the last one
+		// Reset lastComplimentIndex if it's invalid for current array
+		if (this.lastComplimentIndex < 0 || this.lastComplimentIndex >= compliments.length) {
+			this.lastComplimentIndex = -1;
+		}
+
+		// Only avoid the last index if it's valid for the current array
+		// For testing: if only 2 compliments, force alternation
+		if (compliments.length === 2 && this.lastComplimentIndex >= 0 && this.lastComplimentIndex < compliments.length) {
+			// Force the opposite index
+			complimentIndex = this.lastComplimentIndex === 0 ? 1 : 0;
+			Log.debug(`${this.name} randomIndex: forced alternation, newIndex=${complimentIndex}`);
+		} else {
+			// Normal random selection avoiding last index
+			while (complimentIndex === this.lastComplimentIndex
+			  && this.lastComplimentIndex >= 0
+			  && this.lastComplimentIndex < compliments.length
+			  && attempts < maxAttempts) {
+				complimentIndex = generate();
+				attempts++;
+			}
+			if (attempts >= maxAttempts) {
+				Log.warn(`${this.name} randomIndex: max attempts reached, using index ${complimentIndex}`);
+			}
 		}
 
 		this.lastComplimentIndex = complimentIndex;
+		Log.debug(`${this.name} randomIndex: selected index=${complimentIndex} from array of length=${compliments.length}`);
 
 		return complimentIndex;
 	},
@@ -208,19 +286,45 @@ Module.register("compliments", {
 	 * @returns {Promise} Resolved when the file is loaded
 	 */
 	async loadComplimentFile () {
-		const isRemote = this.config.remoteFile.indexOf("http://") === 0 || this.config.remoteFile.indexOf("https://") === 0,
-			url = isRemote ? this.config.remoteFile : this.file(this.config.remoteFile);
+		const isRemote = this.config.remoteFile.indexOf("http://") === 0 || this.config.remoteFile.indexOf("https://") === 0;
+		let url;
+
+		if (isRemote) {
+			url = this.config.remoteFile;
+		} else {
+			// Handle local file paths
+			// If path starts with ../ or /, treat it as relative to root or absolute
+			if (this.config.remoteFile.indexOf("../") === 0 || this.config.remoteFile.indexOf("/") === 0) {
+				// Path is relative to root or absolute - use as-is but ensure it starts with /
+				url = this.config.remoteFile.startsWith("/")
+					? this.config.remoteFile
+					: `/${this.config.remoteFile.replace(/^\.\.\//, "")}`;
+			} else {
+				// Path is relative to module directory
+				url = this.file(this.config.remoteFile);
+			}
+		}
+
 		// because we may be fetching the same url,
 		// we need to force the server to not give us the cached result
 		// create an extra property (ignored by the server handler) just so the url string is different
 		// that will never be the same, using the ms value of date
 		if (isRemote && this.config.remoteFileRefreshInterval !== 0) this.urlSuffix = `?dummy=${Date.now()}`;
-		//
+		else this.urlSuffix = "";
+
+		Log.info(`${this.name} loading compliment file from: ${url}`);
 		try {
 			const response = await fetch(url + this.urlSuffix);
-			return await response.text();
+			if (!response.ok) {
+				Log.error(`${this.name} fetch failed: ${response.status} ${response.statusText} for ${url}`);
+				return null;
+			}
+			const text = await response.text();
+			Log.info(`${this.name} successfully loaded compliment file, length: ${text.length}`);
+			return text;
 		} catch (error) {
-			Log.info(`${this.name} fetch failed error=`, error);
+			Log.error(`${this.name} fetch failed error:`, error);
+			return null;
 		}
 	},
 
@@ -231,6 +335,13 @@ Module.register("compliments", {
 	getRandomCompliment () {
 		// get the current time of day compliments list
 		const compliments = this.complimentArray();
+
+		// If array is empty, return empty string
+		if (compliments.length === 0) {
+			Log.warn(`${this.name} getRandomCompliment: compliments array is empty!`);
+			return "";
+		}
+
 		// variable for index to next message to display
 		let index;
 		// are we randomizing
@@ -239,11 +350,17 @@ Module.register("compliments", {
 			index = this.randomIndex(compliments);
 		} else {
 			// no, sequential
+			// Reset if index is out of bounds for current array
+			if (this.lastIndexUsed >= compliments.length || this.lastIndexUsed < 0) {
+				this.lastIndexUsed = -1;
+			}
 			// if doing sequential, don't fall off the end
 			index = this.lastIndexUsed >= compliments.length - 1 ? 0 : ++this.lastIndexUsed;
 		}
 
-		return compliments[index] || "";
+		const selectedCompliment = compliments[index] || "";
+		Log.debug(`${this.name} getRandomCompliment: selected index=${index}, total=${compliments.length}, text="${selectedCompliment}"`);
+		return selectedCompliment;
 	},
 
 	// Override dom generator.
@@ -252,10 +369,18 @@ Module.register("compliments", {
 		wrapper.className = this.config.classes ? this.config.classes : "thin xlarge bright pre-line";
 		// get the compliment text
 		const complimentText = this.getRandomCompliment();
+		// Log for debugging
+		Log.info(`${this.name} getDom: complimentText="${complimentText}", random=${this.config.random}, lastIndex=${this.lastComplimentIndex}, lastIndexUsed=${this.lastIndexUsed}`);
+
 		// split it into parts on newline text
 		const parts = complimentText.split("\n");
 		// create a span to hold the compliment
 		const compliment = document.createElement("span");
+		// Add a data attribute with timestamp to force DOM change detection
+		// This ensures moduleNeedsUpdate will detect a change even if text is the same
+		compliment.setAttribute("data-update-time", Date.now());
+		compliment.setAttribute("data-update-id", Math.random().toString(36).substring(7));
+
 		// process all the parts of the compliment text
 		for (const part of parts) {
 			if (part !== "") {
@@ -270,6 +395,9 @@ Module.register("compliments", {
 			// remove the last break
 			compliment.lastElementChild.remove();
 			wrapper.appendChild(compliment);
+		} else {
+			// If no content, add a non-breaking space to ensure wrapper has content
+			wrapper.appendChild(document.createTextNode("\u00A0"));
 		}
 		// if a new set of compliments was loaded from the refresh task
 		// we do this here to make sure no other function is using the compliments list

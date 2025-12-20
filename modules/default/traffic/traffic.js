@@ -40,6 +40,7 @@ Module.register("traffic", {
 	disabled: false,
 	map: null,
 	mapInitialized: false,
+	mapUpdating: false,
 	routeLayer: null,
 	markers: [],
 
@@ -118,13 +119,18 @@ Module.register("traffic", {
 	socketNotificationReceived (notification, payload) {
 		if (notification === "TRAFFIC_DATA") {
 			if (this.disabled) return;
+			// Destroy existing map before DOM update
+			if (this.mapInitialized) {
+				this.mapUpdating = true;
+				this.destroyMap();
+			}
 			this.processTrafficData(payload);
 			this.loaded = true;
 			this.error = null;
 			this.updateDom(this.config.animationSpeed);
-			// Initialize map after DOM update
+			// Recreate map after DOM update
 			setTimeout(() => {
-				if (!this.mapInitialized && typeof L !== "undefined") {
+				if (typeof L !== "undefined" && this.routes.length > 0) {
 					this.initializeMap();
 				}
 			}, 2500);
@@ -158,10 +164,7 @@ Module.register("traffic", {
 		this.routes = data.routes || [];
 		this.lastUpdate = new Date();
 		Log.info(`[Traffic] Received traffic data: ${this.routes.length} route(s)`);
-		// Update map if initialized
-		if (this.mapInitialized) {
-			this.updateMap();
-		}
+		// Map will be recreated after DOM update, no need to update here
 	},
 
 	/**
@@ -236,7 +239,8 @@ Module.register("traffic", {
 			metrics: metrics,
 			lastUpdate: this.lastUpdate,
 			alternatives: this.config.showAlternatives ? this.routes.slice(1) : [],
-			showMap: true
+			showMap: true,
+			mapUpdating: this.mapUpdating
 		};
 	},
 
@@ -397,13 +401,7 @@ Module.register("traffic", {
 			this.updateTimer = null;
 		}
 		// Clean up map
-		if (this.map) {
-			this.map.remove();
-			this.map = null;
-			this.mapInitialized = false;
-			this.routeLayer = null;
-			this.markers = [];
-		}
+		this.destroyMap();
 	},
 
 	/**
@@ -423,23 +421,94 @@ Module.register("traffic", {
 	},
 
 	/**
+	 * Destroy the Leaflet map
+	 */
+	destroyMap () {
+		if (this.map) {
+			try {
+				// Remove all layers
+				if (this.routeLayer) {
+					this.map.removeLayer(this.routeLayer);
+					this.routeLayer = null;
+				}
+				this.markers.forEach((marker) => {
+					this.map.removeLayer(marker);
+				});
+				this.markers = [];
+
+				// Remove the map instance
+				this.map.remove();
+				this.map = null;
+				this.mapInitialized = false;
+				Log.info("[Traffic] Map destroyed");
+			} catch (error) {
+				Log.error("[Traffic] Error destroying map:", error);
+				// Reset state even if there was an error
+				this.map = null;
+				this.mapInitialized = false;
+				this.routeLayer = null;
+				this.markers = [];
+			}
+		}
+	},
+
+	/**
 	 * Initialize Leaflet map
 	 */
 	initializeMap () {
 		if (typeof L === "undefined") {
 			Log.warn("[Traffic] Leaflet library not loaded yet");
+			if (this.mapUpdating) {
+				this.mapUpdating = false;
+				const moduleWrapper = document.getElementById(this.identifier);
+				if (moduleWrapper) {
+					const updatingMessage = moduleWrapper.querySelector(".traffic-map-updating");
+					if (updatingMessage) {
+						updatingMessage.remove();
+					}
+				}
+			}
+			return;
+		}
+
+		// Don't initialize if already initialized
+		if (this.mapInitialized) {
+			if (this.mapUpdating) {
+				this.mapUpdating = false;
+				const moduleWrapper = document.getElementById(this.identifier);
+				if (moduleWrapper) {
+					const updatingMessage = moduleWrapper.querySelector(".traffic-map-updating");
+					if (updatingMessage) {
+						updatingMessage.remove();
+					}
+				}
+			}
 			return;
 		}
 
 		const moduleWrapper = document.getElementById(this.identifier);
 		if (!moduleWrapper) {
 			Log.warn("[Traffic] Module wrapper not found");
+			if (this.mapUpdating) {
+				this.mapUpdating = false;
+				const updatingMessage = moduleWrapper?.querySelector(".traffic-map-updating");
+				if (updatingMessage) {
+					updatingMessage.remove();
+				}
+			}
 			return;
 		}
 
 		const mapContainer = moduleWrapper.querySelector(".traffic-map-container");
 		if (!mapContainer) {
 			Log.warn("[Traffic] Map container not found");
+			if (this.mapUpdating) {
+				this.mapUpdating = false;
+				const updatingMessage = moduleWrapper.querySelector(".traffic-map-updating");
+				if (updatingMessage) {
+					updatingMessage.remove();
+				}
+			}
 			return;
 		}
 
@@ -484,12 +553,31 @@ Module.register("traffic", {
 			this.map.setView(center, zoom);
 
 			this.mapInitialized = true;
+			this.mapUpdating = false;
 			Log.info("[Traffic] Map initialized");
 
 			// Update map with route data
 			this.updateMap();
+
+			// Hide updating message by directly manipulating DOM (don't call updateDom as it recreates the DOM)
+			const moduleWrapper = document.getElementById(this.identifier);
+			if (moduleWrapper) {
+				const updatingMessage = moduleWrapper.querySelector(".traffic-map-updating");
+				if (updatingMessage) {
+					updatingMessage.remove();
+				}
+			}
 		} catch (error) {
 			Log.error("[Traffic] Error initializing map:", error);
+			this.mapUpdating = false;
+			// Hide updating message on error
+			const moduleWrapper = document.getElementById(this.identifier);
+			if (moduleWrapper) {
+				const updatingMessage = moduleWrapper.querySelector(".traffic-map-updating");
+				if (updatingMessage) {
+					updatingMessage.remove();
+				}
+			}
 		}
 	},
 
@@ -779,13 +867,7 @@ Module.register("traffic", {
 		}
 
 		// Clean up map
-		if (this.map) {
-			this.map.remove();
-			this.map = null;
-			this.mapInitialized = false;
-			this.routeLayer = null;
-			this.markers = [];
-		}
+		this.destroyMap();
 
 		this.updateDom();
 	},

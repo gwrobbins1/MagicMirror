@@ -122,4 +122,66 @@ describe("Compliments module", () => {
 		});
 	});
 
+	describe("Feature array change handling", () => {
+		describe("compliments update when array changes", () => {
+			beforeAll(async () => {
+				await helpers.startApplication("tests/configs/modules/compliments/compliments_array_change.js");
+				await helpers.getDocument();
+			});
+
+			it("should update and show different compliments over time", async () => {
+				// Wait for initial display
+				let elem = await helpers.waitForElement(".compliments .module-content");
+				expect(elem).not.toBeNull();
+				const initialText = elem.textContent;
+
+				// Wait for multiple update cycles (updateInterval is 1000ms)
+				// Collect displayed compliments over several seconds
+				const displayedCompliments = new Set();
+				displayedCompliments.add(initialText);
+
+				// Check multiple times to ensure updates are happening
+				for (let i = 0; i < 5; i++) {
+					await new Promise((r) => setTimeout(r, 1500)); // Wait longer than updateInterval
+					elem = await helpers.waitForElement(".compliments .module-content");
+					if (elem && elem.textContent) {
+						displayedCompliments.add(elem.textContent);
+					}
+				}
+
+				// Verify that at least 2 different compliments were shown
+				// This proves the module is updating and not stuck on the same text
+				expect(displayedCompliments.size).toBeGreaterThan(1);
+			});
+
+			it("should handle array size changes without getting stuck", async () => {
+				// This test verifies that when the compliments array changes size
+				// (e.g., from morning to afternoon), the module continues to update
+				const validCompliments = [
+					"Morning A",
+					"Morning B",
+					"Afternoon A",
+					"Afternoon B",
+					"Afternoon C",
+					"Evening A",
+					"Anytime A",
+					"Anytime B"
+				];
+
+				// Wait for initial display
+				let elem = await helpers.waitForElement(".compliments .module-content");
+				expect(elem).not.toBeNull();
+				expect(validCompliments).toContain(elem.textContent);
+
+				// Wait for several updates
+				await new Promise((r) => setTimeout(r, 5000));
+
+				// Verify it's still showing valid compliments
+				elem = await helpers.waitForElement(".compliments .module-content");
+				expect(elem).not.toBeNull();
+				expect(validCompliments).toContain(elem.textContent);
+			});
+		});
+	});
+
 });
