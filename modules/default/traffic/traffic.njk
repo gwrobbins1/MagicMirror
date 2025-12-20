@@ -13,7 +13,13 @@
 {% elif loaded and route and metrics %}
   <div class="traffic-container">
     {% if showMap %}
-      <div class="traffic-map-container"></div>
+      <div class="traffic-map-container">
+        {% if mapUpdating %}
+          <div class="traffic-map-updating">
+            <div class="small dimmed">Updating map...</div>
+          </div>
+        {% endif %}
+      </div>
     {% endif %}
     <div class="traffic-route">
       <div class="traffic-route-info">
